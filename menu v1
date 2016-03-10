@@ -1,0 +1,465 @@
+#include "mindsensors-motormux.h"
+ 
+// --- Sensor Ports
+#define SV_Color                        SensorValue[S4]
+#define SV_TouchStart   SensorValue[S3]
+#define SV_TouchEnd             SensorValue[S2]
+ 
+// --- Horizontal Motion Positions (in encoder degrees)
+#define H_DIST                                                          802
+#define H_BASECOATSTART                         85
+#define H_BIGNOZZLE                                             590
+ 
+enum tMotorType
+{
+        turnTable,
+        H_motion,
+        H_icing,
+        V_icing
+};
+ 
+enum tDirection
+{
+        forward1,
+        backward1,
+        in, // icing in
+        out // icing out
+};
+ 
+enum tDecorateType
+{
+        basecoat,
+        spiralPipe,
+        dottedEdgePipe,
+        continuousEdgePipe,
+        colorDetermined
+};
+ 
+tDecorateType g_decorateType = basecoat;
+bool g_iceTopEnded = true;
+bool g_iceSidesEnded = true;
+ 
+void waitForButtonPress( int button = -1 )
+{
+        if( button == -1 )
+        {
+                while( nNxtButtonPressed == -1 ){ wait1Msec(50); }
+                wait1Msec( 200 );
+                while( nNxtButtonPressed != -1 ){ wait1Msec(50); }
+                wait1Msec( 200 );
+        }
+        else
+        {
+                while( nNxtButtonPressed != button ){ wait1Msec(50); }
+                wait1Msec( 200 );
+                while( nNxtButtonPressed == button ){ wait1Msec(50); }
+                wait1Msec( 200 );
+        }
+}
+ 
+void setMotor( tMotorType motorType, int speed, tDirection dir = forward1 )
+{
+        switch( motorType )
+        {
+        case H_motion:
+                if( dir == forward1 )
+                        motor[H_motion] = -speed;
+                else
+                        motor[H_motion] = speed;
+                break;
+ 
+        case H_icing:
+                if( dir == out )
+                        motor[H_icing] = -speed;
+                else
+                        motor[H_icing] = speed;
+                break;
+ 
+        case turnTable:
+                if( dir == out )
+                        motor[turnTable] = -speed;
+                else
+                        motor[turnTable] = speed;
+                break;
+ 
+        case V_icing:
+                if( dir == forward1 ){
+                        MSMMotor(mmotor_S1_1, speed);
+                }
+                else{
+                        MSMMotor(mmotor_S1_1, -speed);
+                }
+                break;
+ 
+        default:
+                break;
+        }
+}
+ 
+void brakeMotor( tMotorType motorType )
+{
+        setMotor( motorType, 5 * -1 * sgn(motor[motorType]) );
+        wait1Msec( 200 );
+        setMotor( motorType, 0 );
+}
+ 
+void moveDistance( tMotorType motorType, int speed, tDirection dir, int distance, bool stopMotor = true )
+{
+        setMotor( motorType, speed, dir );
+        if( motorType != V_icing )
+        {
+                if( dir == forward1 || dir == out )
+                        while( nMotorEncoder[motorType] > -distance ){ wait1Msec(50); }
+                else
+                        while( nMotorEncoder[motorType] < distance ){   wait1Msec(50); }
+        }
+        else
+        {
+                if( dir == out )
+                        while( MSMMotorEncoder(mmotor_S1_1) > -distance ){ wait1Msec(50); }
+                else
+                        while( MSMMotorEncoder(mmotor_S1_1) < distance ){ wait1Msec(50); }
+        }
+ 
+        if( stopMotor )
+                brakeMotor( motorType );
+}
+ 
+void resetPositions( bool startPos = true )
+{
+        // set turnTable motion to 0
+        setMotor( turnTable, 0 );
+ 
+        // reset horizontal motion
+        setMotor( H_motion, 50, forward1 );
+        while( SV_TouchStart == 0 ){}
+        setMotor( H_motion, 0 );
+        nMotorEncoder[H_motion] = 0;
+ 
+        // reset horizontal icing dispencing motion
+        if( startPos )
+                moveDistance( H_icing, 70, out, 1400 );
+        else
+                moveDistance( H_icing, 70, in, 0 );
+ 
+        // reset vertical icing dispencing motion
+        if( startPos )
+                moveDistance( V_icing, 70, out, 850 );
+        else
+                moveDistance( V_icing, 70, in, 0 );
+}
+ 
+void waitTurnTable( int degrees, bool reset = true )
+{
+        if( reset )
+                nMotorEncoder[turnTable] = 0;
+        while( nMotorEncoder[turnTable] < degrees ){ wait1Msec(50); }
+}
+ 
+tDecorateType getColorType( TColors color )
+{
+        if( color == WHITECOLOR )
+                return spiralPipe;
+        else if( color == REDCOLOR )
+                return dottedEdgePipe;
+        else
+                return continuousEdgePipe;
+}
+ 
+// ------------------------------------------------------------- ICING PRODECURE FUNCTIONS (START)
+ 
+void iceBasecoat( bool top )
+{
+        if( top )
+        {
+                // get to starting position and let turntable get up to a consistant speed
+                setMotor( turnTable, 25, forward1 );
+                moveDistance( H_motion, 50, backward1, H_BASECOATSTART );
+                waitTurnTable( 1080 );
+ 
+                setMotor( H_icing, 20, out );
+                waitTurnTable( 370 );
+ 
+                moveDistance( H_motion, 50, backward1, H_BASECOATSTART + H_BIGNOZZLE );
+ 
+                setMotor( H_icing, 17, out );
+                waitTurnTable( 390 );
+ 
+                brakeMotor( H_icing );
+                brakeMotor( turnTable );
+        }
+        else
+        {
+                // ********* TEST THIS, NOT SURE IF IT WORKS CAUSE I DONT HAVE A 9V BATTERY TO TEST THE MULTIPLEXER WITH... :)
+                // --- Note to remember: vertical and horizontal components are icing at the same time
+                waitTurnTable( 1080, false );
+ 
+                setMotor( V_icing, 20, out );
+                waitTurnTable( 370, false );
+ 
+                brakeMotor( V_icing );
+        }
+}
+ 
+void iceSpiralPipe( bool top )
+{
+        if( top )
+        {
+                // let turntable get up to a consistant speed
+                setMotor( turnTable, 30, forward1 );
+                waitTurnTable( 1080 );
+ 
+                setMotor( H_icing, 25, out );
+                moveDistance( H_motion, 20, backward1, H_BASECOATSTART + H_BIGNOZZLE );
+ 
+                brakeMotor( H_motion );
+                brakeMotor( H_icing );
+                brakeMotor( turnTable );
+        }
+        else
+        {
+                // ********* TEST THIS, NOT SURE IF IT WORKS CAUSE I DONT HAVE A 9V BATTERY TO TEST THE MULTIPLEXER WITH... :)
+                // --- Note to remember: vertical and horizontal components are icing at the same time
+                waitTurnTable( 1080, false );
+ 
+                // make a dot every 20 degrees of the turntable rotation
+                for( int i = 0; i < 360; i += 40 )
+                {
+                        setMotor( V_icing, 60, out );
+                        waitTurnTable( 20, false );
+                        setMotor( V_icing, 30, out );
+                        waitTurnTable( 20, false );
+                }
+ 
+                brakeMotor( V_icing );
+        }
+}
+ 
+void iceDottedEdgePipe( bool top )
+{
+        if( top )
+        {
+                // let turntable get up to a consistant speed
+                setMotor( turnTable, 20, forward1 );
+                waitTurnTable( 1080 );
+ 
+                // make a dot every 20 degrees of the turntable rotation
+                for( int i = 0; i < 360; i += 35 )
+                {
+                        setMotor( H_icing, 80, out );
+                        waitTurnTable( 15 );
+                        setMotor( H_icing, 0 );
+                        waitTurnTable( 20 );
+                }
+ 
+                brakeMotor( H_icing );
+                brakeMotor( turnTable );
+        }
+        else
+        {
+                // ********* TEST THIS, NOT SURE IF IT WORKS CAUSE I DONT HAVE A 9V BATTERY TO TEST THE MULTIPLEXER WITH... :)
+                // --- Note to remember: vertical and horizontal components are icing at the same time
+                waitTurnTable( 1080, false );
+ 
+                // make a dot every 20 degrees of the turntable rotation
+                for( int i = 0; i < 360; i += 35 )
+                {
+                        setMotor( V_icing, 80, out );
+                        waitTurnTable( 15, false );
+                        setMotor( V_icing, 0 );
+                        waitTurnTable( 20, false );
+                }
+ 
+                brakeMotor( V_icing );
+        }
+}
+ 
+void iceContinuousEdgePipe( bool top )
+{
+        if( top )
+        {
+                // let turntable get up to a consistant speed
+                setMotor( turnTable, 20, forward1 );
+                waitTurnTable( 1080 );
+ 
+                // make a dot every 20 degrees of the turntable rotation
+                for( int i = 0; i < 360; i += 30 )
+                {
+                        setMotor( H_icing, 60, out );
+                        waitTurnTable( 15 );
+                        setMotor( H_icing, 30, out );
+                        waitTurnTable( 15 );
+                }
+ 
+                brakeMotor( H_icing );
+                brakeMotor( turnTable );
+        }
+        else
+        {
+                // ********* TEST THIS, NOT SURE IF IT WORKS CAUSE I DONT HAVE A 9V BATTERY TO TEST THE MULTIPLEXER WITH... :)
+                // --- Note to remember: vertical and horizontal components are icing at the same time
+                waitTurnTable( 1080, false );
+ 
+                // make a dot every 20 degrees of the turntable rotation
+                for( int i = 0; i < 360; i += 40 )
+                {
+                        setMotor( V_icing, 60, out );
+                        waitTurnTable( 20, false );
+                        setMotor( V_icing, 30, out );
+                        waitTurnTable( 20, false );
+                }
+ 
+                brakeMotor( V_icing );
+        }
+}
+// ------------------------------------------------------------- ICING PRODECURE FUNCTIONS (END)
+ 
+task iceTop()
+{
+        switch( g_decorateType )
+        {
+        case basecoat:
+                iceBasecoat( true );
+                break;
+ 
+        case spiralPipe:
+                iceSpiralPipe( true );
+                break;
+ 
+        case dottedEdgePipe:
+                iceDottedEdgePipe( true );
+                break;
+ 
+        case continuousEdgePipe:
+                iceContinuousEdgePipe( true );
+                break;
+ 
+        default:
+                break;
+        }
+ 
+        g_iceTopEnded = true;
+}
+ 
+task iceSides()
+{
+        switch( g_decorateType )
+        {
+        case basecoat:
+                iceBasecoat( false );
+                break;
+ 
+        case spiralPipe:
+                iceSpiralPipe( false );
+                break;
+ 
+        case dottedEdgePipe:
+                iceDottedEdgePipe( false );
+                break;
+ 
+        case continuousEdgePipe:
+                iceContinuousEdgePipe( false );
+                break;
+ 
+        default:
+                break;
+        }
+ 
+        g_iceSidesEnded = true;
+}
+ 
+ 
+void decorateTop( tDecorateType type )
+{
+        g_decorateType = type;
+        g_iceTopEnded = false;
+        startTask( iceTop );
+}
+ 
+void decorateSides( tDecorateType type )
+{
+        g_decorateType = type;
+        g_iceSidesEnded = false;
+        startTask( iceSides );
+}
+ 
+ 
+task main()
+{
+        // initialize multiplexer connected to sensor port S1
+        SensorType[S1] = sensorI2CCustom;
+        MSMMUXinit();
+ 
+        nMotorEncoder[H_motion] = 0;
+        nMotorEncoder[motorB] = 0;
+        nMotorEncoder[turnTable] = 0;
+        MSMMotorEncoderReset(mmotor_S1_1);
+ 
+        // starting screen
+        SensorType[S2] = sensorTouch;
+        SensorType[S4] = sensorColorNxtFULL;
+        SensorType[S3] = sensorTouch;
+        displayString(0, "Start <ENTER>");
+        waitForButtonPress();
+        resetPositions();
+ 
+        //      tDecorateType pipeType = continuousEdgePipe;
+ 
+        //menu selection
+        eraseDisplay();
+        displayString(1, "Press Button 1 For Spiral Design");
+        displayString(4, "Press Button 2 For Dotted Design");
+        displayString(7, "Press Button 3 For Continuous Design");
+ 
+        tDecorateType pipeType;
+        while (nNxtButtonPressed != -1){}
+        if(nNxtButtonPressed==1)
+                pipeType= spiralPipe;
+ 
+        else if (nNxtButtonPressed==2)
+                pipeType= dottedEdgePipe;
+ 
+        else if (nNxtButtonPressed ==3)
+                pipeType= continuousEdgePipe;
+ 
+        g_decorateType = basecoat;
+ 
+        for( int i = 0; i < 2; i++ )
+        {
+                decorateTop( g_decorateType );
+                decorateSides( g_decorateType );
+                while( !g_iceTopEnded || !g_iceSidesEnded ){ wait1Msec(50); }
+ 
+                // change to the piping decoration type
+                if( pipeType == colorDetermined )
+                        g_decorateType = getColorType( SV_Color );
+                else
+                        g_decorateType = pipeType;
+ 
+                displayString( 0, " RESET FALSE    " );
+                resetPositions( false );
+ 
+                eraseDisplay();
+                if(pipeType==spiralPipe)
+                        displayString(4, "Insert Nozzle 1 and Red Icing");
+ 
+                else if(pipeType==dottedEdgePipe)
+                        displayString(4,"Insert Nozzle 2 and Blue Icing");
+ 
+                else
+                        displayString(4, "Insert Nozzle 3 and Purple Icing");
+ 
+                displayString( 0, " WAIT FOR BUTTON " );
+                waitForButtonPress();
+ 
+                displayString( 0, " RESET TRUE " );
+                resetPositions( true );
+        }
+ 
+ 
+        // This should be at the very end of the program
+        waitForButtonPress();
+        resetPositions( false );
+ 
+        MSMotorStop( mmotor_S1_1 );
+}
